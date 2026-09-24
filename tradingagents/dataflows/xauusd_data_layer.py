@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 
 from tradingagents.dataflows.intraday_types import Candle, MarketTick, Timeframe
-from tradingagents.dataflows.market_data_provider import MarketDataProvider, MockDataProvider
+from tradingagents.dataflows.market_data_provider import (
+    MarketDataProvider,
+    create_market_data_provider,
+)
 from tradingagents.dataflows.state_reconciliation import canonicalize_timeframe
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
+from tradingagents.xauusd_config import XAUUSD_CONFIG
 
 
 class XAUUSDDataLayer:
@@ -28,7 +31,24 @@ class XAUUSDDataLayer:
     ):
         self.symbol = symbol.upper()
         self.default_timeframe = canonicalize_timeframe(default_timeframe)
-        self.provider: MarketDataProvider = provider or MockDataProvider(symbol=self.symbol)
+        self.provider: MarketDataProvider = provider or create_market_data_provider(
+            str(XAUUSD_CONFIG.get("provider", "mock")), symbol=self.symbol
+        )
+
+    async def get_historical_candles(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        timeframe: str | Timeframe | None = None,
+    ) -> list[Candle]:
+        """Fetch canonical candles through the configured provider abstraction.
+
+        The older ``load_candles(curr_date)`` API remains for legacy callers;
+        new provider-backed work should use this explicit historical range.
+        """
+        chosen = canonicalize_timeframe(timeframe or self.default_timeframe)
+        return await self.provider.get_historical_candles(self.symbol, chosen, start, end)
 
     def load_candles(
         self,

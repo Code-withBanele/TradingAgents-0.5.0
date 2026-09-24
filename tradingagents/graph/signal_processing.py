@@ -57,6 +57,7 @@ class QuantSignal(BaseModel):
     valid: bool = Field(default=True, description="Whether this represents a valid actionable signal")
     # Optional strategy payload fields used by the deterministic strategy layer.
     strategy_id: str | None = None
+    strategy_version: str | None = None
     entry: float | None = None
     stop: float | None = None
     target: float | None = None
@@ -132,7 +133,7 @@ class QuantSignal(BaseModel):
         return self
 
     @classmethod
-    def no_valid_signal(cls, *, reason: str = "NO VALID SIGNAL") -> "QuantSignal":
+    def no_valid_signal(cls, *, reason: str = "NO VALID SIGNAL") -> QuantSignal:
         """Construct a fail-closed no-signal sentinel.
 
         This is the structural representation of "NO VALID SIGNAL" and is used

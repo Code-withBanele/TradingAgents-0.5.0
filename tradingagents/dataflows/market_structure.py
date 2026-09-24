@@ -15,279 +15,49 @@ Historical safety:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Iterable, Sequence
 
 import pytz
 
 from tradingagents.dataflows.intraday_types import Candle
 from tradingagents.dataflows.technical_indicators import calculate_atr
+from tradingagents.quant.models import (
+    MSS_MIN_ATR_MULTIPLE,
+    STRUCTURE_EVENT_ALIASES,
+    BreakerBlock,
+    BreakOfStructure,
+    CISDDefinition,
+    CISDEvent,
+    DealingRangeSource,
+    DisplacementDefinition,
+    DisplacementEvent,
+    FairValueGap,
+    InstrumentConfig,
+    InverseFairValueGap,
+    LiquidityPool,
+    LiquiditySweep,
+    ManipulationConfirmedBOS,
+    MarketStructureState,
+    OrderBlock,
+    PremiumDiscountState,
+    PriceLocation,
+    SessionContext,
+    SessionName,
+    StrategyConditionResult,
+    StrategyDefinition,
+    StructureDirection,
+    SwingPoint,
+    TradeSetup,
+)
 
 
-class StructureDirection(str, Enum):
-    """Constrained directional state for simple market structure."""
-
-    BULLISH = "BULLISH"
-    BEARISH = "BEARISH"
-    NEUTRAL = "NEUTRAL"
-    UNKNOWN = "UNKNOWN"
-
-
-class SessionName(str, Enum):
-    """Canonical intraday sessions for XAUUSD analysis."""
-
-    ASIA = "ASIA"
-    LONDON = "LONDON"
-    NEW_YORK = "NEW_YORK"
-    LONDON_NEW_YORK_OVERLAP = "LONDON_NEW_YORK_OVERLAP"
-    OUTSIDE_CONFIGURED_SESSION = "OUTSIDE_CONFIGURED_SESSION"
-
-
-class PriceLocation(str, Enum):
-    """Premium/discount context for a value relative to the dealing range."""
-
-    PREMIUM = "PREMIUM"
-    DISCOUNT = "DISCOUNT"
-    EQUILIBRIUM = "EQUILIBRIUM"
-    UNKNOWN = "UNKNOWN"
-
-
-@dataclass(frozen=True)
-class SwingPoint:
-    """A local extreme value on the candle history."""
-
-    index: int
-    timestamp: str
-    kind: str
-    price: float
-    confirmed: bool = False
-    confirmation_index: int | None = None
-
-
-@dataclass(frozen=True)
-class MarketStructureState:
-    """Small trader-friendly summary of recent swing context."""
-
-    last_swing_high: float | None = None
-    last_swing_low: float | None = None
-    previous_swing_high: float | None = None
-    previous_swing_low: float | None = None
-    direction: StructureDirection = StructureDirection.UNKNOWN
-    session: SessionName | None = None
-    session_open: str | None = None
-    session_high: float | None = None
-    session_low: float | None = None
-    previous_session_high: float | None = None
-    previous_session_low: float | None = None
-
-
-@dataclass(frozen=True)
-class BreakOfStructure:
-    """Structured break of the most recent swing level."""
-
-    detected: bool
-    direction: StructureDirection
-    broken_level: float | None = None
-    confirmation_timestamp: str | None = None
-    confirmation_index: int | None = None
-    structure_event_kind: str = "BOS"
-
-
-# MSS and CISD are currently aliases for CHoCH pending mechanical definitions.
-STRUCTURE_EVENT_ALIASES = {"MSS": "CHoCH", "CISD": "CHoCH"}
-
-
-@dataclass(frozen=True)
-class InstrumentConfig:
-    pip_size: float = 0.0001
-    price_decimals: int = 5
-
-
-@dataclass(frozen=True)
-class LiquidityPool:
-    direction: StructureDirection
-    level: float
-    touch_indices: tuple[int, ...]
-    swept: bool = False
-    swept_index: int | None = None
-
-
-@dataclass(frozen=True)
-class ManipulationConfirmedBOS:
-    """AMD-pattern structure: an initial BOS proven to be manipulation by a
-    deeper sweep and reclaimed after a failed pullback.
-
-    While pending, unavailable later-stage price fields are NaN and their
-    indices are -1. Consumers must check ``status`` before using those fields.
-    """
-
-    direction: StructureDirection
-    initial_break_level: float
-    pre_break_level: float
-    manipulation_extreme: float
-    failed_pullback_level: float
-    initial_break_index: int
-    manipulation_extreme_index: int
-    failed_pullback_index: int
-    reclaim_index: int | None = None
-    reclaim_timestamp: str | None = None
-    status: str = "PENDING"
-    invalidation_reason: str | None = None
-
-
-@dataclass(frozen=True)
-class LiquiditySweep:
-    """Minimal structural sweep event."""
-
-    detected: bool
-    direction: StructureDirection
-    swept_level: float | None = None
-    timestamp: str | None = None
-    sweep_index: int | None = None
-    confirmation_index: int | None = None
-
-
-@dataclass(frozen=True)
-class FairValueGap:
-    """Deterministic three-candle imbalance gap with explicit lifecycle state."""
-
-    direction: StructureDirection
-    low: float
-    high: float
-    created_at: str
-    timestamp: str
-    timeframe: str = "5m"
-    size: float = 0.0
-    status: str = "FVG_ACTIVE"
-    mitigation_status: str = "UNMITIGATED"
-    invalidation_status: str = "VALID"
-    formation_index: int | None = None
-    confirmation_index: int | None = None
-
-
-@dataclass(frozen=True)
-class InverseFairValueGap:
-    """Transition from one imbalance to an opposite imbalance."""
-
-    original_direction: StructureDirection
-    new_direction: StructureDirection
-    original_low: float | None = None
-    original_high: float | None = None
-    new_low: float | None = None
-    new_high: float | None = None
-    transition_timestamp: str | None = None
-    status: str = "ACTIVE"
-
-
-@dataclass(frozen=True)
-class OrderBlock:
-    """Deterministic demand/supply zone created by a directional displacement event."""
-
-    direction: StructureDirection
-    high: float
-    low: float
-    origin_timestamp: str
-    confirmation_timestamp: str
-    associated_structure_event: str = "break_of_structure"
-    displacement: float = 0.0
-    mitigation_status: str = "ACTIVE"
-    invalidation_status: str = "VALID"
-    version: str = "v0.1"
-    source_index: int | None = None
-    confirmation_index: int | None = None
-
-
-@dataclass(frozen=True)
-class BreakerBlock:
-    """Existing zone that flips directional interpretation after a failure event."""
-
-    origin_zone: OrderBlock
-    original_direction: StructureDirection
-    failure_event: str
-    new_direction: StructureDirection
-    high: float
-    low: float
-    status: str = "ACTIVE"
-    transition_timestamp: str | None = None
-
-
-@dataclass(frozen=True)
-class DisplacementEvent:
-    """Directional displacement with explicit detector-strength metadata."""
-
-    direction: StructureDirection
-    timestamp: str
-    magnitude: float
-    atr_multiple: float
-    body_ratio: float
-    structure_broken: bool
-    confidence: float
-    confirmation_index: int | None = None
-
-
-@dataclass(frozen=True)
-class PremiumDiscountState:
-    """Deterministic price-location context relative to a recent dealing range."""
-
-    range_high: float
-    range_low: float
-    equilibrium: float
-    premium_zone: tuple[float, float]
-    discount_zone: tuple[float, float]
-    location: PriceLocation = PriceLocation.UNKNOWN
-    timeframe: str = "5m"
-
-
-@dataclass(frozen=True)
-class SessionContext:
-    """Simple deterministic session state for intraday XAUUSD analysis."""
-
-    session: SessionName
-    session_open: str | None = None
-    session_high: float | None = None
-    session_low: float | None = None
-    previous_session_high: float | None = None
-    previous_session_low: float | None = None
-    timezone_name: str = "UTC"
-
-
-@dataclass(frozen=True)
-class StrategyConditionResult:
-    """Condition-by-condition output for deterministic strategy evaluation."""
-
-    name: str
-    passed: bool
-    detail: str = ""
-
-
-@dataclass(frozen=True)
-class StrategyDefinition:
-    """Small strategy descriptor with deterministic requirements and outputs."""
-
-    strategy_id: str
-    strategy_version: str
-    required_features: tuple[str, ...] = ()
-    confirmation_rules: tuple[str, ...] = ()
-    invalidation_rules: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class TradeSetup:
-    """Deterministic trade candidate produced by a strategy evaluator."""
-
-    strategy_id: str
-    strategy_version: str
-    direction: StructureDirection
-    confidence: float = 0.0
-    entry: float | None = None
-    stop: float | None = None
-    target: float | None = None
-    status: str = "INVALID"
-    conditions: tuple[StrategyConditionResult, ...] = ()
-    required_features: tuple[str, ...] = ()
-    timestamp: str | None = None
+def _round_instrument_price(value: float, instrument: InstrumentConfig) -> float:
+    increment = instrument.minimum_price_increment or instrument.tick_size
+    rounded = round(value / increment) * increment if increment else value
+    decimals = instrument.provider_precision if instrument.provider_precision is not None else instrument.price_decimals
+    return round(rounded, decimals)
 
 
 def _coerce_candles(candles: Sequence[Candle] | Iterable[Candle] | None) -> list[Candle]:
@@ -411,12 +181,16 @@ def compute_market_structure(
     else:
         direction = StructureDirection.NEUTRAL
 
+    confirmed_swings = find_swing_points(items, lookback=lookback, require_confirmation=True)
+    protected = next((s for s in reversed(confirmed_swings)
+                      if s.kind == ("low" if direction == StructureDirection.BULLISH else "high")), None)
     base = MarketStructureState(
         last_swing_high=last_high,
         last_swing_low=last_low,
         previous_swing_high=previous_high,
         previous_swing_low=previous_low,
         direction=direction,
+        protected_swing=protected if direction in (StructureDirection.BULLISH, StructureDirection.BEARISH) else None,
     )
     session = detect_session_context(items)
     if session is not None:
@@ -432,8 +206,26 @@ def compute_market_structure(
             session_low=session.session_low,
             previous_session_high=session.previous_session_high,
             previous_session_low=session.previous_session_low,
+            protected_swing=base.protected_swing,
         )
     return base
+
+
+def _structure_break_kind(
+    prior: Sequence[Candle], candle: Candle, level: float,
+    state: MarketStructureState, direction: StructureDirection,
+) -> str:
+    if state.direction in (StructureDirection.UNKNOWN, StructureDirection.NEUTRAL, direction):
+        return "BOS"
+    protected = state.protected_swing
+    if protected is None or abs(protected.price - level) > 1e-12:
+        return "CHoCH"
+    atr_period = min(14, max(1, len(prior) - 1))
+    atr = calculate_atr(prior, period=atr_period) if atr_period > 0 else None
+    body = abs(candle.close - candle.open)
+    if atr is not None and atr.atr and atr.atr > 0 and body / atr.atr >= MSS_MIN_ATR_MULTIPLE:
+        return "MSS"
+    return "CHoCH"
 
 
 def _all_break_of_structure_events(
@@ -459,7 +251,8 @@ def _all_break_of_structure_events(
         latest_low = max(prior_lows, key=lambda swing: swing.index) if prior_lows else None
 
         if latest_high and prev.close <= latest_high.price and curr.close > latest_high.price:
-            prior_direction = compute_market_structure(prior, lookback=lookback).direction
+            prior_state = compute_market_structure(prior, lookback=lookback)
+            event_kind = _structure_break_kind(prior, curr, latest_high.price, prior_state, StructureDirection.BULLISH)
             events.append(
                 BreakOfStructure(
                     detected=True,
@@ -467,11 +260,12 @@ def _all_break_of_structure_events(
                     broken_level=float(latest_high.price),
                     confirmation_timestamp=curr.timestamp,
                     confirmation_index=idx,
-                    structure_event_kind="CHoCH" if prior_direction == StructureDirection.BEARISH else "BOS",
+                    structure_event_kind=event_kind,
                 )
             )
         elif latest_low and prev.close >= latest_low.price and curr.close < latest_low.price:
-            prior_direction = compute_market_structure(prior, lookback=lookback).direction
+            prior_state = compute_market_structure(prior, lookback=lookback)
+            event_kind = _structure_break_kind(prior, curr, latest_low.price, prior_state, StructureDirection.BEARISH)
             events.append(
                 BreakOfStructure(
                     detected=True,
@@ -479,7 +273,7 @@ def _all_break_of_structure_events(
                     broken_level=float(latest_low.price),
                     confirmation_timestamp=curr.timestamp,
                     confirmation_index=idx,
-                    structure_event_kind="CHoCH" if prior_direction == StructureDirection.BULLISH else "BOS",
+                    structure_event_kind=event_kind,
                 )
             )
 
@@ -495,6 +289,57 @@ def detect_break_of_structure(
     items = _coerce_candles(candles)
     events = _all_break_of_structure_events(items, lookback=lookback)
     return events[0] if events else None
+
+
+def detect_cisd(
+    candles: Sequence[Candle] | Iterable[Candle] | None,
+    *,
+    definition: CISDDefinition | None = None,
+) -> list[CISDEvent]:
+    """Apply the versioned cisd-v1 body-close and next-close acceptance rule.
+
+    A candidate requires a directional body close through the open of the
+    latest opposite candle and a configurable minimum body ratio. Wick-only
+    crosses do not qualify. A following close beyond the candidate close
+    confirms it; a close through its opposite extreme invalidates it first.
+    This is an operational definition, not a universal claim about ICT usage.
+    """
+    items = _coerce_candles(candles)
+    definition = definition or CISDDefinition()
+    events: list[CISDEvent] = []
+    for idx in range(1, len(items)):
+        candle = items[idx]
+        bullish, bearish = candle.close > candle.open, candle.close < candle.open
+        if not bullish and not bearish:
+            continue
+        direction = StructureDirection.BULLISH if bullish else StructureDirection.BEARISH
+        opposing = next((items[j] for j in range(idx - 1, -1, -1)
+                         if (items[j].close < items[j].open if bullish else items[j].close > items[j].open)), None)
+        if opposing is None:
+            continue
+        body_ratio = abs(candle.close - candle.open) / max(candle.high - candle.low, 1e-12)
+        level = float(opposing.open)
+        if not (candle.close > level if bullish else candle.close < level):
+            continue
+        if body_ratio < definition.minimum_body_ratio:
+            continue
+        if definition.require_displacement:
+            movement = detect_displacement(items[:idx + 1])
+            if movement is None or movement.direction != direction:
+                continue
+        status, confirmation_index = "INCOMPLETE", None
+        for future_idx in range(idx + 1, len(items)):
+            future = items[future_idx]
+            invalidated = future.close < candle.low if bullish else future.close > candle.high
+            if invalidated:
+                status, confirmation_index = "INVALIDATED", future_idx
+                break
+            if future.close > candle.close if bullish else future.close < candle.close:
+                status, confirmation_index = "CONFIRMED", future_idx
+                break
+        timestamp = items[confirmation_index].timestamp if confirmation_index is not None else candle.timestamp
+        events.append(CISDEvent(direction, level, idx, confirmation_index, status, timestamp, definition.version))
+    return events
 
 
 def _pre_break_level(
@@ -834,7 +679,8 @@ def detect_fvg(
             low = float(left.high)
             high = float(current.low)
             gaps.append(
-                FairValueGap(
+                _fvg_lifecycle(
+                    FairValueGap(
                     direction=StructureDirection.BULLISH,
                     low=low,
                     high=high,
@@ -844,13 +690,15 @@ def detect_fvg(
                     confirmation_index=idx,
                     timeframe=timeframe,
                     size=abs(high - low),
+                    ), items,
                 )
             )
         elif left.low > current.high + tolerance:
             low = float(current.high)
             high = float(left.low)
             gaps.append(
-                FairValueGap(
+                _fvg_lifecycle(
+                    FairValueGap(
                     direction=StructureDirection.BEARISH,
                     low=low,
                     high=high,
@@ -860,9 +708,43 @@ def detect_fvg(
                     confirmation_index=idx,
                     timeframe=timeframe,
                     size=abs(high - low),
+                    ), items,
                 )
             )
     return gaps
+
+
+def _fvg_lifecycle(gap: FairValueGap, items: Sequence[Candle]) -> FairValueGap:
+    """Resolve an FVG's state using only candles present in this input snapshot."""
+    assert gap.confirmation_index is not None
+    partial = fully = invalidated = False
+    mitigation_timestamp = invalidation_timestamp = None
+    for candle in items[gap.confirmation_index + 1:]:
+        if gap.direction == StructureDirection.BULLISH:
+            partial = partial or candle.low < gap.high
+            fully = fully or candle.low <= gap.low
+            if candle.close < gap.low and not invalidated:
+                invalidated, invalidation_timestamp = True, candle.timestamp
+        else:
+            partial = partial or candle.high > gap.low
+            fully = fully or candle.high >= gap.high
+            if candle.close > gap.high and not invalidated:
+                invalidated, invalidation_timestamp = True, candle.timestamp
+        if partial and mitigation_timestamp is None:
+            mitigation_timestamp = candle.timestamp
+    if invalidated:
+        status, invalidation = "INVALIDATED", "INVALIDATED"
+    elif fully:
+        status, invalidation = "FULLY_MITIGATED", "VALID"
+    elif partial:
+        status, invalidation = "PARTIALLY_MITIGATED", "VALID"
+    else:
+        status = "CREATED" if gap.confirmation_index == len(items) - 1 else "ACTIVE"
+        invalidation = "VALID"
+    return dataclass_replace(
+        gap, status=status, mitigation_status=status, invalidation_status=invalidation,
+        mitigation_timestamp=mitigation_timestamp, invalidation_timestamp=invalidation_timestamp,
+    )
 
 
 def detect_ifvg(
@@ -870,41 +752,34 @@ def detect_ifvg(
     *,
     tolerance: float = 0.0,
 ) -> list[InverseFairValueGap]:
-    """Explicit inverse-FVG transition detector for a later imbalance reversal."""
+    """Detect an invalidated original FVG followed by opposite-side acceptance.
+
+    A close beyond the far edge invalidates the original gap; a subsequent
+    candle must also close beyond that edge before an inverse gap is emitted.
+    """
     items = _coerce_candles(candles)
     if len(items) < 3:
         return []
     gaps = detect_fvg(items, tolerance=tolerance)
     transitions: list[InverseFairValueGap] = []
-    for idx in range(1, len(gaps)):
-        prior = gaps[idx - 1]
-        current = gaps[idx]
-        if prior.direction == StructureDirection.BULLISH and current.direction == StructureDirection.BEARISH:
-            transitions.append(
-                InverseFairValueGap(
-                    original_direction=prior.direction,
-                    new_direction=current.direction,
-                    original_low=prior.low,
-                    original_high=prior.high,
-                    new_low=current.low,
-                    new_high=current.high,
-                    transition_timestamp=current.timestamp,
-                    status="ACTIVE",
-                )
-            )
-        elif prior.direction == StructureDirection.BEARISH and current.direction == StructureDirection.BULLISH:
-            transitions.append(
-                InverseFairValueGap(
-                    original_direction=prior.direction,
-                    new_direction=current.direction,
-                    original_low=prior.low,
-                    original_high=prior.high,
-                    new_low=current.low,
-                    new_high=current.high,
-                    transition_timestamp=current.timestamp,
-                    status="ACTIVE",
-                )
-            )
+    for gap in gaps:
+        boundary = gap.low if gap.direction == StructureDirection.BULLISH else gap.high
+        invalidated_at = next(
+            (i for i, c in enumerate(items) if c.timestamp == gap.invalidation_timestamp), None
+        )
+        if invalidated_at is None or invalidated_at + 1 >= len(items):
+            continue
+        acceptance = items[invalidated_at + 1]
+        accepted = acceptance.close < boundary if gap.direction == StructureDirection.BULLISH else acceptance.close > boundary
+        if accepted:
+            transitions.append(InverseFairValueGap(
+                original_direction=gap.direction,
+                new_direction=StructureDirection.BEARISH if gap.direction == StructureDirection.BULLISH else StructureDirection.BULLISH,
+                original_low=gap.low,
+                original_high=gap.high,
+                transition_timestamp=acceptance.timestamp,
+                status="ACTIVE",
+            ))
     return transitions
 
 
@@ -1030,8 +905,9 @@ def detect_displacement(
     *,
     atr_period: int = 14,
     threshold: float = 1.5,
+    definition: DisplacementDefinition | None = None,
 ) -> DisplacementEvent | None:
-    """Directional displacement event defined by ATR-normalized move and a structure break."""
+    """Measure raw move, ATR-relative move, body dominance, and structure break."""
     items = _coerce_candles(candles)
     if len(items) < 2:
         return None
@@ -1042,10 +918,13 @@ def detect_displacement(
     current = items[-1]
     magnitude = abs(current.close - previous.close)
     atr_multiple = magnitude / atr.atr
-    if atr_multiple < threshold:
+    definition = definition or DisplacementDefinition(minimum_atr_multiple=threshold)
+    if atr_multiple < definition.minimum_atr_multiple:
         return None
     direction = StructureDirection.BULLISH if current.close >= previous.close else StructureDirection.BEARISH
     body_ratio = abs(current.close - current.open) / max(current.high - current.low, 1e-9)
+    if body_ratio < definition.minimum_body_ratio:
+        return None
     structure_broken = detect_break_of_structure(items) is not None
     confidence = min(1.0, atr_multiple / (threshold * 2.0))
     return DisplacementEvent(
@@ -1057,6 +936,7 @@ def detect_displacement(
         structure_broken=structure_broken,
         confidence=float(confidence),
         confirmation_index=len(items) - 1,
+        definition_version=definition.version,
     )
 
 
@@ -1065,14 +945,36 @@ def calculate_premium_discount(
     *,
     lookback: int = 20,
     timeframe: str = "5m",
+    source: DealingRangeSource = DealingRangeSource.STRUCTURAL_RANGE,
+    custom_range: tuple[float, float] | None = None,
 ) -> PremiumDiscountState | None:
-    """Range-relative premium/discount context with explicit equilibrium."""
+    """Calculate premium/discount using a declared structural, session, or custom range."""
     items = _coerce_candles(candles)
     if not items:
         return None
-    window = items[-lookback:] if len(items) > lookback else items
-    range_high = max(c.high for c in window)
-    range_low = min(c.low for c in window)
+    if source == DealingRangeSource.CUSTOM_RANGE:
+        if custom_range is None:
+            raise ValueError("custom_range is required for CUSTOM_RANGE")
+        range_low, range_high = map(float, custom_range)
+        start_timestamp = end_timestamp = None
+    elif source == DealingRangeSource.SESSION_RANGE:
+        session = detect_session_context(items)
+        if session is None or session.session_high is None or session.session_low is None:
+            return None
+        range_high, range_low = session.session_high, session.session_low
+        start_timestamp, end_timestamp = session.session_start, session.session_end
+    else:
+        swings = find_swing_points(items, lookback=lookback, require_confirmation=True)
+        highs = [s for s in swings if s.kind == "high"]
+        lows = [s for s in swings if s.kind == "low"]
+        if not highs or not lows:
+            return None
+        high_point, low_point = highs[-1], lows[-1]
+        range_high, range_low = float(high_point.price), float(low_point.price)
+        start_timestamp = min(high_point.timestamp, low_point.timestamp)
+        end_timestamp = max(high_point.timestamp, low_point.timestamp)
+    if range_high <= range_low:
+        raise ValueError("dealing range high must exceed range low")
     equilibrium = (range_high + range_low) / 2.0
     last_close = float(items[-1].close)
     if last_close >= equilibrium:
@@ -1087,6 +989,9 @@ def calculate_premium_discount(
         discount_zone=(float(range_low), float(equilibrium)),
         location=location,
         timeframe=timeframe,
+        source=source,
+        range_start_timestamp=start_timestamp,
+        range_end_timestamp=end_timestamp,
     )
 
 
@@ -1122,24 +1027,46 @@ def detect_session_context(
     else:
         session = SessionName.OUTSIDE_CONFIGURED_SESSION
 
-    session_items = [c for c in items if _to_utc_datetime(c.timestamp).date() == last_ts.date()]
-    if not session_items:
-        session_items = items
+    def local_window(zone_name: str):
+        zone = pytz.timezone(zone_name)
+        local_date = last_ts.astimezone(zone).date()
+        start = zone.localize(datetime.combine(local_date, datetime.min.time()).replace(hour=8))
+        end = zone.localize(datetime.combine(local_date, datetime.min.time()).replace(hour=17))
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
-    session_open = session_items[0].timestamp
-    session_high = max(c.high for c in session_items)
-    session_low = min(c.low for c in session_items)
-    previous_session = [c for c in items if _to_utc_datetime(c.timestamp).date() < last_ts.date()]
-    previous_session_high = max((c.high for c in previous_session), default=None)
-    previous_session_low = min((c.low for c in previous_session), default=None)
+    if session == SessionName.ASIA:
+        start = datetime.combine(last_ts.date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+        end = start.replace(hour=8)
+    elif session == SessionName.LONDON:
+        start, end = local_window("Europe/London")
+    elif session == SessionName.NEW_YORK:
+        start, end = local_window("America/New_York")
+    elif session == SessionName.LONDON_NEW_YORK_OVERLAP:
+        london_start, london_end = local_window("Europe/London")
+        ny_start, ny_end = local_window("America/New_York")
+        start, end = max(london_start, ny_start), min(london_end, ny_end)
+    else:
+        start = end = None
+
+    session_items = [
+        c for c in items
+        if start is not None and start <= _to_utc_datetime(c.timestamp) <= last_ts
+        and _to_utc_datetime(c.timestamp) < end
+    ]
+    session_open = session_items[0].timestamp if session_items else None
+    session_high = max((c.high for c in session_items), default=None)
+    session_low = min((c.low for c in session_items), default=None)
+    previous_session_high = previous_session_low = None
     return SessionContext(
         session=session,
         session_open=session_open,
-        session_high=float(session_high),
-        session_low=float(session_low),
-        previous_session_high=float(previous_session_high) if previous_session_high is not None else None,
-        previous_session_low=float(previous_session_low) if previous_session_low is not None else None,
+        session_high=float(session_high) if session_high is not None else None,
+        session_low=float(session_low) if session_low is not None else None,
+        previous_session_high=previous_session_high,
+        previous_session_low=previous_session_low,
         timezone_name=timezone_name,
+        session_start=start.isoformat() if start is not None else None,
+        session_end=end.isoformat() if end is not None else None,
     )
 
 
@@ -1147,15 +1074,27 @@ def detect_previous_levels(
     candles: Sequence[Candle] | Iterable[Candle] | None,
     *,
     lookback_days: int = 1,
+    timezone_name: str = "UTC",
 ) -> dict[str, float | None]:
-    """Previous day/week levels for a deterministic horizon-aware market state."""
+    """Aggregate the latest completed available local day and ISO week."""
     items = _coerce_candles(candles)
     if not items:
         return {"PDH": None, "PDL": None, "PWH": None, "PWL": None}
-    recent = items[-max(1, lookback_days * 24 * 60):]
-    pdh = max(c.high for c in recent)
-    pdl = min(c.low for c in recent)
-    return {"PDH": float(pdh), "PDL": float(pdl), "PWH": float(pdh), "PWL": float(pdl)}
+    zone = pytz.timezone(timezone_name)
+    dated = [(c, _to_utc_datetime(c.timestamp).astimezone(zone).date()) for c in items]
+    current_day = dated[-1][1]
+    current_week = current_day.isocalendar()[:2]
+    prior_days = sorted({day for _, day in dated if day < current_day})
+    prior_weeks = sorted({day.isocalendar()[:2] for _, day in dated if day.isocalendar()[:2] < current_week})
+    day_group = [c for c, day in dated if prior_days and day == prior_days[-1]]
+    week_key = prior_weeks[-1] if prior_weeks else None
+    week_group = [c for c, day in dated if week_key and day.isocalendar()[:2] == week_key]
+    return {
+        "PDH": float(max(c.high for c in day_group)) if day_group else None,
+        "PDL": float(min(c.low for c in day_group)) if day_group else None,
+        "PWH": float(max(c.high for c in week_group)) if week_group else None,
+        "PWL": float(min(c.low for c in week_group)) if week_group else None,
+    }
 
 
 def build_strategy_registry() -> dict[str, StrategyDefinition]:
@@ -1193,10 +1132,11 @@ def evaluate_strategy(
     candles: Sequence[Candle] | Iterable[Candle] | None,
     *,
     strategy_id: str = "LIQUIDITY_SWEEP_FVG_REVERSAL",
-    instrument: InstrumentConfig = InstrumentConfig(),
+    instrument: InstrumentConfig | None = None,
 ) -> TradeSetup:
     """Evaluate the requested registered strategy and derive levels from its structure."""
     items = _coerce_candles(candles)
+    instrument = instrument or InstrumentConfig()
     registry = build_strategy_registry()
     definition = registry.get(strategy_id)
     if definition is None:
@@ -1250,13 +1190,14 @@ def evaluate_strategy(
             strategy_version=definition.strategy_version,
             direction=direction,
             confidence=sum(condition.passed for condition in conditions) / max(1, len(conditions)),
-            entry=round(float(entry), instrument.price_decimals) if entry is not None else None,
-            stop=round(float(stop), instrument.price_decimals) if stop is not None else None,
-            target=round(float(target), instrument.price_decimals) if target is not None else None,
+            entry=_round_instrument_price(float(entry), instrument) if entry is not None else None,
+            stop=_round_instrument_price(float(stop), instrument) if stop is not None else None,
+            target=_round_instrument_price(float(target), instrument) if target is not None else None,
             status="VALID" if valid else "INVALID",
             conditions=tuple(conditions),
             required_features=definition.required_features,
             timestamp=items[-1].timestamp if items else None,
+            timeframe=items[-1].timeframe.value if items else "5m",
         )
     sweep = detect_liquidity_sweep(items)
     gaps = detect_fvg(items)
@@ -1316,13 +1257,14 @@ def evaluate_strategy(
         strategy_version=definition.strategy_version,
         direction=direction,
         confidence=min(1.0, passed / max(1, len(conditions))),
-        entry=round(float(entry), instrument.price_decimals) if entry is not None else None,
-        stop=round(float(stop), instrument.price_decimals) if stop is not None else None,
-        target=round(float(target), instrument.price_decimals) if target is not None else None,
+        entry=_round_instrument_price(float(entry), instrument) if entry is not None else None,
+        stop=_round_instrument_price(float(stop), instrument) if stop is not None else None,
+        target=_round_instrument_price(float(target), instrument) if target is not None else None,
         status="VALID" if valid else "INVALID",
         conditions=tuple(conditions),
         required_features=definition.required_features,
         timestamp=items[-1].timestamp if items else None,
+        timeframe=items[-1].timeframe.value if items else "5m",
     )
 
 
@@ -1336,13 +1278,14 @@ def to_quant_signal(setup: TradeSetup, *, symbol: str):
     reasons = [condition.name for condition in setup.conditions if condition.passed] or ["strategy_valid"]
     return QuantSignal(
         symbol=symbol,
-        timeframe="5m",
+        timeframe=setup.timeframe,
         direction=direction,
         setup_type=SignalSetupType.CONFIRMED_REVERSAL,
         strength=setup.confidence,
         reasons=reasons,
         valid=True,
         strategy_id=setup.strategy_id,
+        strategy_version=setup.strategy_version,
         entry=setup.entry,
         stop=setup.stop,
         target=setup.target,
@@ -1350,12 +1293,22 @@ def to_quant_signal(setup: TradeSetup, *, symbol: str):
     )
 
 
-def evaluate_quant_signal(candles, *, symbol: str, strategy_id: str = "LIQUIDITY_SWEEP_FVG_REVERSAL", instrument: InstrumentConfig = InstrumentConfig()):
+def evaluate_quant_signal(
+    candles: Sequence[Candle] | Iterable[Candle] | None,
+    *,
+    symbol: str,
+    strategy_id: str = "LIQUIDITY_SWEEP_FVG_REVERSAL",
+    instrument: InstrumentConfig | None = None,
+):
     """Public convenience entry point: evaluate a setup and convert valid candidates."""
     return to_quant_signal(evaluate_strategy(candles, strategy_id=strategy_id, instrument=instrument), symbol=symbol)
 
 
 __all__ = [
+    "CISDDefinition",
+    "CISDEvent",
+    "DealingRangeSource",
+    "DisplacementDefinition",
     "InstrumentConfig",
     "LiquidityPool",
     "BreakOfStructure",
@@ -1380,6 +1333,7 @@ __all__ = [
     "calculate_premium_discount",
     "compute_market_structure",
     "detect_break_of_structure",
+    "detect_cisd",
     "detect_breaker_blocks",
     "detect_displacement",
     "detect_fvg",

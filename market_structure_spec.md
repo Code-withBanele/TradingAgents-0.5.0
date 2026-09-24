@@ -17,10 +17,8 @@ real XAUUSD charts.
   calendar. Each market window is 08:00 inclusive through 17:00 exclusive.
   When both windows are open the label is `LONDON_NEW_YORK_OVERLAP`. Asia is
   the configured UTC window 00:00–08:00. Other times are outside configured
-  sessions. `session_open`, `session_high`, and `session_low` use UTC-calendar-
-  day grouping, not the local session window used to choose the `session`
-  label; they summarize that UTC date's candles rather than session-window-only
-  extrema.
+  sessions. Session range fields are aggregated from candles belonging to the
+  current configured session window, not the full UTC calendar day.
 
 ## Structural event rules
 
@@ -79,3 +77,43 @@ relationships. They cannot verify that swing, sweep, FVG, or block labels
 match a trader's intended reading of XAUUSD. That requires independent
 hand-labeled charts with instrument, timeframe, timezone, and label rationale
 recorded alongside each example.
+
+## Phase 3C deterministic extensions
+
+- A swing is the strict local extreme defined above. Confirmed swings require
+  the complete right-side lookback; indices are zero-based candle indices and
+  timestamps are copied from the source candle. No detector backdates an event
+  timestamp to a candle that was not available when it confirmed.
+- Market direction continues to use the existing higher-low / lower-high / then
+  higher-high / lower-low ordering in `compute_market_structure`. The protected
+  swing is the latest confirmed low in a bullish state or high in a bearish
+  state. A close crossing the nearest confirmed swing in the current direction
+  is BOS. An opposing close crossing is CHoCH. It is labeled MSS only when it
+  crosses the protected swing and its body is at least 1.5 times the prior ATR.
+  ATR is calculated on bars before the break. Neutral or unknown context yields
+  BOS because reversal cannot be established from absent directional state.
+- CISD uses the isolated `cisd-v1` definition: a directional candle body must
+  close through the open of the latest opposing candle and meet the configured
+  body-ratio floor. A later close beyond the candidate close confirms it; a
+  close through the candidate extreme invalidates it first. A wick alone never
+  qualifies. Displacement is optional and disabled by default. This definition
+  is versioned because the term has multiple methodology-specific meanings.
+- FVG status is evaluated over the candles supplied in the current snapshot:
+  ACTIVE until later trading enters the gap, PARTIALLY_MITIGATED on first entry,
+  FULLY_MITIGATED on a trade to the far boundary, and INVALIDATED on a close
+  beyond that boundary. Formation and confirmation indices remain explicit.
+  Historical callers must pass only data available at their as-of time.
+- Premium/discount requires an explicit structural, session, or custom range.
+  Custom ranges must be provided. Structural range uses the latest confirmed
+  high and low; session range uses the active configured session window.
+- Previous levels aggregate the most recent completed available local calendar
+  day and ISO week, excluding the current local day/week. Missing observations
+  are not synthesized; if no prior period is present, levels are `None`.
+- Session ranges include only candles inside the active timezone-aware session
+  window up through the latest candle. Classification and range aggregation are
+  separate; outside-session snapshots have no current session range.
+- XAUUSD precision is caller configuration. `InstrumentConfig` defaults retain
+  generic FX-compatible pip/decimal settings for compatibility; callers should
+  explicitly supply gold settings (commonly 0.01 pip/tick and two decimals).
+  Provider precision can override the configured decimals when supplied by the
+  caller. No symbol-based inference is performed.

@@ -122,4 +122,7 @@ def test_xauusd_config_defaults_are_paper_and_non_live():
     assert XAUUSD_CONFIG["trading_mode"] == "paper"
     assert XAUUSD_CONFIG["live_trading"] is False
     assert XAUUSD_CONFIG["symbol"] == "XAUUSD"
+    assert XAUUSD_CONFIG["provider"] == "massive"
+    assert XAUUSD_CONFIG["provider_symbol"] == "C:XAUUSD"
+    assert XAUUSD_CONFIG["asset_class"] == "spot_gold"
     assert Timeframe.M1 in {Timeframe.M1, Timeframe.M5}
