@@ -55,6 +55,12 @@ class QuantSignal(BaseModel):
     )
     reasons: list[str] = Field(default_factory=list, description="Structured reason codes")
     valid: bool = Field(default=True, description="Whether this represents a valid actionable signal")
+    # Optional strategy payload fields used by the deterministic strategy layer.
+    strategy_id: str | None = None
+    entry: float | None = None
+    stop: float | None = None
+    target: float | None = None
+    timestamp: str | None = None
 
     @field_validator("symbol", "timeframe")
     @classmethod

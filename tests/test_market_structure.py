@@ -2,15 +2,19 @@ import pytest
 
 from tradingagents.dataflows.intraday_types import Candle, Timeframe
 from tradingagents.dataflows.market_structure import (
+    BreakOfStructure,
     FairValueGap,
     LiquiditySweep,
+    ManipulationConfirmedBOS,
     OrderBlock,
+    SwingPoint,
     StructureDirection,
     compute_market_structure,
     detect_break_of_structure,
     detect_breaker_blocks,
     detect_fvg,
     detect_liquidity_sweep,
+    detect_manipulation_confirmed_bos,
     detect_order_blocks,
     detect_session_context,
     evaluate_strategy,
@@ -57,6 +61,31 @@ def _ohlc_candles(rows):
     return candles
 
 
+def _amd_candles(*, bearish=False, tail=True):
+    rows = [
+        (10, 11, 9, 10),
+        (12, 13, 10, 12),
+        (9, 12, 8, 9),
+        (9.5, 10, 9, 9.5),
+        (13.5, 14, 9.5, 13.5),
+        (10, 12, 7, 10),
+        (9, 11, 8, 9),
+        (11, 12, 9, 11),
+        (10, 11, 9, 10),
+        (12.5, 13.5, 10, 12.5),
+        (12, 15, 11, 14),
+    ]
+    if not tail:
+        rows = rows[:7]
+    if bearish:
+        pivot = 20
+        rows = [(2 * pivot - o, 2 * pivot - low, 2 * pivot - high, 2 * pivot - close) for o, high, low, close in rows]
+    return _ohlc_candles([
+        {"open": o, "high": high, "low": low, "close": close}
+        for o, high, low, close in rows
+    ])
+
+
 def test_valid_swing_high_is_detected():
     candles = _ohlc_candles([
         {"open": 100, "high": 100, "low": 99, "close": 99.5},
@@ -97,6 +126,139 @@ def test_configurable_lookback_changes_detection():
     short_window = find_swing_points(candles, lookback=1)
     long_window = find_swing_points(candles, lookback=2)
     assert len(short_window) >= len(long_window)
+
+
+@pytest.mark.parametrize("bearish", [False, True])
+def test_manipulation_confirmed_bos_clean_sequence(bearish):
+    result = detect_manipulation_confirmed_bos(_amd_candles(bearish=bearish), lookback=1)
+    assert result is not None
+    assert result.status == "CONFIRMED"
+    assert result.initial_break_index < result.manipulation_extreme_index < result.failed_pullback_index < result.reclaim_index
+
+
+def test_manipulation_confirmed_bos_invalidated_when_extreme_is_retaken():
+    candles = _amd_candles()
+    candles[8] = candles[8].model_copy(update={"low": 6.5, "close": 10.0, "open": 10.0})
+    result = detect_manipulation_confirmed_bos(candles[:9], lookback=1)
+    assert result is not None
+    assert result.status == "INVALIDATED"
+    assert result.invalidation_reason == "manipulation_extreme_retaken"
+
+
+def test_manipulation_confirmed_bos_invalidated_when_prebreak_level_is_lost():
+    candles = _amd_candles()
+    candles[8] = candles[8].model_copy(update={"open": 8.0, "low": 7.5, "close": 7.8})
+    result = detect_manipulation_confirmed_bos(candles[:9], lookback=1)
+    assert result is not None
+    assert result.status == "INVALIDATED"
+    assert result.invalidation_reason == "pre_break_level_reclaimed_against"
+
+
+def test_manipulation_confirmed_bos_invalidated_by_opposing_bos(monkeypatch):
+    candles = _amd_candles()
+    monkeypatch.setattr(
+        market_structure,
+        "_all_break_of_structure_events",
+        lambda items, *, lookback: [
+            BreakOfStructure(True, StructureDirection.BULLISH, 13.0, items[4].timestamp, 4),
+            BreakOfStructure(True, StructureDirection.BEARISH, 10.0, items[7].timestamp, 7),
+        ],
+    )
+    result = detect_manipulation_confirmed_bos(candles, lookback=1)
+    assert result is not None
+    assert result.status == "INVALIDATED"
+    assert result.invalidation_reason == "opposing_bos_before_reclaim"
+
+
+def test_manipulation_confirmed_bos_stays_pending_before_failed_pullback():
+    result = detect_manipulation_confirmed_bos(_amd_candles(tail=False), lookback=1)
+    assert result is not None
+    assert result.status == "PENDING"
+    assert result.manipulation_extreme_index == 5
+    assert result.failed_pullback_index == -1
+
+
+def test_liquidity_sweep_uses_most_recent_swing_not_highest_priced_swing(monkeypatch):
+    candles = _ohlc_candles([
+        {"open": 10, "high": 11, "low": 10, "close": 10},
+        {"open": 10, "high": 11, "low": 9, "close": 10},
+        {"open": 10, "high": 11, "low": 10, "close": 10},
+        {"open": 10, "high": 11, "low": 10, "close": 10},
+        {"open": 10, "high": 11, "low": 8, "close": 10},
+        {"open": 10, "high": 11, "low": 9, "close": 10},
+        {"open": 8, "high": 10, "low": 7.5, "close": 8},
+        {"open": 8, "high": 9, "low": 8, "close": 8.5},
+    ])
+    swings = [
+        SwingPoint(1, candles[1].timestamp, "low", 9.0, True, 2),
+        SwingPoint(4, candles[4].timestamp, "low", 8.0, True, 5),
+    ]
+    irrelevant = [
+        SwingPoint(0, candles[0].timestamp, "low", 0.0, True, 0),
+        SwingPoint(0, candles[0].timestamp, "high", 100.0, True, 0),
+    ]
+    monkeypatch.setattr(market_structure, "find_swing_points", lambda items, **kwargs: swings if len(items) >= 6 else irrelevant)
+    result = detect_liquidity_sweep(candles)
+    assert result is not None
+    assert result.direction == StructureDirection.BULLISH
+    assert result.swept_level == 8.0
+    assert result.sweep_index == 6
+
+
+@pytest.mark.parametrize(
+    ("bos_direction", "expected"),
+    [
+        (StructureDirection.BEARISH, "liquidity_sweep"),
+        (StructureDirection.BULLISH, "break_of_structure"),
+    ],
+)
+def test_order_block_event_requires_matching_direction_since_structural_swing(monkeypatch, bos_direction, expected):
+    candles = _ohlc_candles([
+        {"open": 10, "high": 11, "low": 9, "close": 10},
+        {"open": 10, "high": 12, "low": 9, "close": 11},
+        {"open": 11, "high": 13, "low": 10, "close": 12},
+    ])
+    monkeypatch.setattr(
+        market_structure,
+        "find_swing_points",
+        lambda items, **kwargs: [SwingPoint(0, candles[0].timestamp, "high", 11, True, 0)],
+    )
+    monkeypatch.setattr(
+        market_structure,
+        "_all_break_of_structure_events",
+        lambda items, *, lookback: [BreakOfStructure(True, bos_direction, 11, candles[1].timestamp, 1)],
+    )
+    blocks = detect_order_blocks(candles, min_displacement=0.1)
+    assert blocks[-1].associated_structure_event == expected
+
+
+def test_manipulation_confirmed_bos_strategy_is_registered_and_wired(monkeypatch):
+    pattern = ManipulationConfirmedBOS(
+        direction=StructureDirection.BULLISH,
+        initial_break_level=13,
+        pre_break_level=8,
+        manipulation_extreme=7,
+        failed_pullback_level=12,
+        initial_break_index=4,
+        manipulation_extreme_index=5,
+        failed_pullback_index=7,
+        reclaim_index=9,
+        reclaim_timestamp="2024-01-01T00:09:00",
+        status="CONFIRMED",
+    )
+    monkeypatch.setattr(market_structure, "detect_manipulation_confirmed_bos", lambda items: pattern)
+    setup = evaluate_strategy(_amd_candles(), strategy_id="MANIPULATION_CONFIRMED_BOS")
+    assert setup.strategy_version == "v0.1"
+    assert setup.required_features == ("manipulation_confirmed_bos",)
+    assert setup.entry == 11.75
+    assert setup.stop == 7
+    assert setup.status == "VALID"
+
+
+def test_manipulation_confirmed_bos_strategy_handles_no_candidate():
+    setup = evaluate_strategy(_candles_from_prices([10, 10, 10, 10]), strategy_id="MANIPULATION_CONFIRMED_BOS")
+    assert setup.status == "INVALID"
+    assert setup.direction == StructureDirection.UNKNOWN
 
 
 def test_insufficient_history_returns_empty():

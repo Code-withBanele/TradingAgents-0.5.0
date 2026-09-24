@@ -92,6 +92,49 @@ class BreakOfStructure:
     broken_level: float | None = None
     confirmation_timestamp: str | None = None
     confirmation_index: int | None = None
+    structure_event_kind: str = "BOS"
+
+
+# MSS and CISD are currently aliases for CHoCH pending mechanical definitions.
+STRUCTURE_EVENT_ALIASES = {"MSS": "CHoCH", "CISD": "CHoCH"}
+
+
+@dataclass(frozen=True)
+class InstrumentConfig:
+    pip_size: float = 0.0001
+    price_decimals: int = 5
+
+
+@dataclass(frozen=True)
+class LiquidityPool:
+    direction: StructureDirection
+    level: float
+    touch_indices: tuple[int, ...]
+    swept: bool = False
+    swept_index: int | None = None
+
+
+@dataclass(frozen=True)
+class ManipulationConfirmedBOS:
+    """AMD-pattern structure: an initial BOS proven to be manipulation by a
+    deeper sweep and reclaimed after a failed pullback.
+
+    While pending, unavailable later-stage price fields are NaN and their
+    indices are -1. Consumers must check ``status`` before using those fields.
+    """
+
+    direction: StructureDirection
+    initial_break_level: float
+    pre_break_level: float
+    manipulation_extreme: float
+    failed_pullback_level: float
+    initial_break_index: int
+    manipulation_extreme_index: int
+    failed_pullback_index: int
+    reclaim_index: int | None = None
+    reclaim_timestamp: str | None = None
+    status: str = "PENDING"
+    invalidation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +287,7 @@ class TradeSetup:
     status: str = "INVALID"
     conditions: tuple[StrategyConditionResult, ...] = ()
     required_features: tuple[str, ...] = ()
+    timestamp: str | None = None
 
 
 def _coerce_candles(candles: Sequence[Candle] | Iterable[Candle] | None) -> list[Candle]:
@@ -392,50 +436,286 @@ def compute_market_structure(
     return base
 
 
-def detect_break_of_structure(
-    candles: Sequence[Candle] | Iterable[Candle] | None,
-    *,
-    lookback: int = 2,
-) -> BreakOfStructure | None:
-    """Return the first clear BOS event in the candle history.
-
-    The primitive checks whether price closes beyond the most recent swing level
-    and is intentionally conservative about duplicate events.
-    """
-    items = _coerce_candles(candles)
+def _all_break_of_structure_events(
+    items: Sequence[Candle], *, lookback: int
+) -> list[BreakOfStructure]:
+    """Return confirmed BOS events in chronological order."""
     if len(items) < 2:
-        return None
+        return []
 
+    events: list[BreakOfStructure] = []
     for idx in range(1, len(items)):
         prior = items[:idx]
         prior_swings = find_swing_points(
             prior, lookback=lookback, require_confirmation=True
         )
-        prior_highs = [s.price for s in prior_swings if s.kind == "high"]
-        prior_lows = [s.price for s in prior_swings if s.kind == "low"]
+        prior_highs = [s for s in prior_swings if s.kind == "high"]
+        prior_lows = [s for s in prior_swings if s.kind == "low"]
 
         curr = items[idx]
         prev = items[idx - 1]
 
-        if prior_highs and prev.close <= prior_highs[-1] and curr.close > prior_highs[-1]:
-            return BreakOfStructure(
-                detected=True,
-                direction=StructureDirection.BULLISH,
-                broken_level=float(prior_highs[-1]),
-                confirmation_timestamp=curr.timestamp,
-                confirmation_index=idx,
+        latest_high = max(prior_highs, key=lambda swing: swing.index) if prior_highs else None
+        latest_low = max(prior_lows, key=lambda swing: swing.index) if prior_lows else None
+
+        if latest_high and prev.close <= latest_high.price and curr.close > latest_high.price:
+            prior_direction = compute_market_structure(prior, lookback=lookback).direction
+            events.append(
+                BreakOfStructure(
+                    detected=True,
+                    direction=StructureDirection.BULLISH,
+                    broken_level=float(latest_high.price),
+                    confirmation_timestamp=curr.timestamp,
+                    confirmation_index=idx,
+                    structure_event_kind="CHoCH" if prior_direction == StructureDirection.BEARISH else "BOS",
+                )
+            )
+        elif latest_low and prev.close >= latest_low.price and curr.close < latest_low.price:
+            prior_direction = compute_market_structure(prior, lookback=lookback).direction
+            events.append(
+                BreakOfStructure(
+                    detected=True,
+                    direction=StructureDirection.BEARISH,
+                    broken_level=float(latest_low.price),
+                    confirmation_timestamp=curr.timestamp,
+                    confirmation_index=idx,
+                    structure_event_kind="CHoCH" if prior_direction == StructureDirection.BULLISH else "BOS",
+                )
             )
 
-        if prior_lows and prev.close >= prior_lows[-1] and curr.close < prior_lows[-1]:
-            return BreakOfStructure(
-                detected=True,
-                direction=StructureDirection.BEARISH,
-                broken_level=float(prior_lows[-1]),
-                confirmation_timestamp=curr.timestamp,
-                confirmation_index=idx,
-            )
+    return events
 
-    return None
+
+def detect_break_of_structure(
+    candles: Sequence[Candle] | Iterable[Candle] | None,
+    *,
+    lookback: int = 2,
+) -> BreakOfStructure | None:
+    """Return the first clear BOS event in the candle history."""
+    items = _coerce_candles(candles)
+    events = _all_break_of_structure_events(items, lookback=lookback)
+    return events[0] if events else None
+
+
+def _pre_break_level(
+    swings: Sequence[SwingPoint], *, direction: StructureDirection, before_index: int
+) -> SwingPoint | None:
+    wanted_kind = "low" if direction == StructureDirection.BULLISH else "high"
+    candidates = [
+        swing
+        for swing in swings
+        if swing.kind == wanted_kind
+        and swing.confirmation_index is not None
+        and swing.confirmation_index < before_index
+    ]
+    return max(candidates, key=lambda swing: swing.confirmation_index) if candidates else None
+
+
+def _associated_order_block_event(
+    items: Sequence[Candle], *, end_index: int, direction: StructureDirection, lookback: int
+) -> str:
+    """Tag an OB only when a same-direction BOS exists in its structural leg."""
+    prefix = items[: end_index + 1]
+    swings = find_swing_points(prefix, lookback=lookback, require_confirmation=True)
+    boundary_kind = "high" if direction == StructureDirection.BULLISH else "low"
+    boundaries = [
+        swing.confirmation_index
+        for swing in swings
+        if swing.kind == boundary_kind and swing.confirmation_index is not None
+    ]
+    structural_boundary = max(boundaries, default=-1)
+    return (
+        "break_of_structure"
+        if any(
+            event.direction == direction
+            and event.confirmation_index is not None
+            and structural_boundary < event.confirmation_index <= end_index
+            for event in _all_break_of_structure_events(prefix, lookback=lookback)
+        )
+        else "liquidity_sweep"
+    )
+
+
+def _manipulation_result(
+    *,
+    bos: BreakOfStructure,
+    pre_break: SwingPoint,
+    extreme: SwingPoint | None = None,
+    failed: SwingPoint | None = None,
+    status: str = "PENDING",
+    invalidation_reason: str | None = None,
+    reclaim_index: int | None = None,
+    reclaim_timestamp: str | None = None,
+) -> ManipulationConfirmedBOS:
+    """Build the fixed public result, marking not-yet-formed stages explicitly."""
+    return ManipulationConfirmedBOS(
+        direction=bos.direction,
+        initial_break_level=float(bos.broken_level),
+        pre_break_level=float(pre_break.price),
+        manipulation_extreme=float(extreme.price) if extreme else float("nan"),
+        failed_pullback_level=float(failed.price) if failed else float("nan"),
+        initial_break_index=int(bos.confirmation_index),
+        manipulation_extreme_index=extreme.index if extreme else -1,
+        failed_pullback_index=failed.index if failed else -1,
+        reclaim_index=reclaim_index,
+        reclaim_timestamp=reclaim_timestamp,
+        status=status,
+        invalidation_reason=invalidation_reason,
+    )
+
+
+def _evaluate_manipulation_candidate(
+    items: Sequence[Candle],
+    *,
+    bos: BreakOfStructure,
+    pre_break: SwingPoint,
+    swings: Sequence[SwingPoint],
+    bos_events: Sequence[BreakOfStructure],
+) -> tuple[ManipulationConfirmedBOS, int | None]:
+    """Walk one candidate forward; return its state and invalidation index."""
+    assert bos.confirmation_index is not None and bos.broken_level is not None
+    bullish = bos.direction == StructureDirection.BULLISH
+    extreme: SwingPoint | None = None
+    failed: SwingPoint | None = None
+    opposing_by_index = {
+        event.confirmation_index
+        for event in bos_events
+        if event.confirmation_index is not None and event.direction != bos.direction
+    }
+
+    for index in range(bos.confirmation_index + 1, len(items)):
+        candle = items[index]
+
+        # Invalidation has priority over reclaim on the same OHLC bar because
+        # intrabar ordering is unavailable in candle data.
+        if extreme is not None and (
+            (candle.low < extreme.price) if bullish else (candle.high > extreme.price)
+        ):
+            return _manipulation_result(
+                bos=bos,
+                pre_break=pre_break,
+                extreme=extreme,
+                failed=failed,
+                status="INVALIDATED",
+                invalidation_reason="manipulation_extreme_retaken",
+            ), index
+        if (candle.close < pre_break.price) if bullish else (candle.close > pre_break.price):
+            return _manipulation_result(
+                bos=bos,
+                pre_break=pre_break,
+                extreme=extreme,
+                failed=failed,
+                status="INVALIDATED",
+                invalidation_reason="pre_break_level_reclaimed_against",
+            ), index
+        if index in opposing_by_index:
+            return _manipulation_result(
+                bos=bos,
+                pre_break=pre_break,
+                extreme=extreme,
+                failed=failed,
+                status="INVALIDATED",
+                invalidation_reason="opposing_bos_before_reclaim",
+            ), index
+
+        newly_confirmed = [
+            swing
+            for swing in swings
+            if swing.confirmation_index == index and swing.index > bos.confirmation_index
+        ]
+        if extreme is None:
+            desired_kind = "low" if bullish else "high"
+            threshold = pre_break.price
+            qualifying = [
+                swing
+                for swing in newly_confirmed
+                if swing.kind == desired_kind
+                and ((swing.price < threshold) if bullish else (swing.price > threshold))
+            ]
+            if qualifying:
+                extreme = min(qualifying, key=lambda swing: swing.price) if bullish else max(qualifying, key=lambda swing: swing.price)
+        elif failed is None:
+            desired_kind = "high" if bullish else "low"
+            qualifying = [
+                swing
+                for swing in newly_confirmed
+                if swing.kind == desired_kind
+                and swing.index > extreme.index
+                and ((swing.price < bos.broken_level) if bullish else (swing.price > bos.broken_level))
+            ]
+            if qualifying:
+                failed = min(qualifying, key=lambda swing: swing.price) if bullish else max(qualifying, key=lambda swing: swing.price)
+
+        if failed is not None and index > int(failed.confirmation_index):
+            reclaimed = candle.close > failed.price if bullish else candle.close < failed.price
+            if reclaimed:
+                return _manipulation_result(
+                    bos=bos,
+                    pre_break=pre_break,
+                    extreme=extreme,
+                    failed=failed,
+                    status="CONFIRMED",
+                    reclaim_index=index,
+                    reclaim_timestamp=candle.timestamp,
+                ), None
+
+    return _manipulation_result(
+        bos=bos, pre_break=pre_break, extreme=extreme, failed=failed
+    ), None
+
+
+def detect_manipulation_confirmed_bos(
+    candles: Sequence[Candle] | Iterable[Candle] | None,
+    *,
+    lookback: int = 2,
+) -> ManipulationConfirmedBOS | None:
+    """Detect the confirmed-swing AMD sequence following the first BOS.
+
+    The walk is bounded by swing structure and explicit invalidation events;
+    there is no fixed bar-count window. A later same-direction BOS starts a
+    fresh walk after an earlier candidate is invalidated.
+    """
+    items = _coerce_candles(candles)
+    swings = find_swing_points(items, lookback=lookback, require_confirmation=True)
+    bos_events = _all_break_of_structure_events(items, lookback=lookback)
+    if not bos_events:
+        return None
+
+    pending_invalidated: ManipulationConfirmedBOS | None = None
+    candidate_events = list(bos_events)
+    event_position = 0
+    while event_position < len(candidate_events):
+        bos = candidate_events[event_position]
+        assert bos.confirmation_index is not None
+        pre_break = _pre_break_level(
+            swings, direction=bos.direction, before_index=bos.confirmation_index
+        )
+        if pre_break is None:
+            event_position += 1
+            continue
+        result, invalidated_at = _evaluate_manipulation_candidate(
+            items,
+            bos=bos,
+            pre_break=pre_break,
+            swings=swings,
+            bos_events=bos_events,
+        )
+        if result.status != "INVALIDATED":
+            return result
+        pending_invalidated = result
+        next_position = next(
+            (
+                position
+                for position in range(event_position + 1, len(candidate_events))
+                if candidate_events[position].confirmation_index is not None
+                and candidate_events[position].confirmation_index > int(invalidated_at)
+            ),
+            None,
+        )
+        if next_position is None:
+            return pending_invalidated
+        event_position = next_position
+    return pending_invalidated
 
 
 def detect_liquidity_sweep(
@@ -459,17 +739,17 @@ def detect_liquidity_sweep(
         prior_swings = find_swing_points(
             history, lookback=lookback, require_confirmation=True
         )
-        prior_lows = [s.price for s in prior_swings if s.kind == "low"]
-        prior_highs = [s.price for s in prior_swings if s.kind == "high"]
+        prior_lows = [s for s in prior_swings if s.kind == "low"]
+        prior_highs = [s for s in prior_swings if s.kind == "high"]
 
         previous = history[-1]
         if prior_lows:
-            support = max(prior_lows)
+            support = max(prior_lows, key=lambda swing: swing.index).price
         else:
             support = float(previous.low)
 
         if prior_highs:
-            resistance = min(prior_highs)
+            resistance = max(prior_highs, key=lambda swing: swing.index).price
         else:
             resistance = float(previous.high)
 
@@ -499,6 +779,38 @@ def detect_liquidity_sweep(
             )
 
     return None
+
+
+def detect_liquidity_pools(
+    candles: Sequence[Candle] | Iterable[Candle] | None,
+    *,
+    tolerance: float = 0.0001,
+    lookback: int = 2,
+) -> list[LiquidityPool]:
+    """Group confirmed equal swing highs/lows and mark close-confirmed sweeps."""
+    items = _coerce_candles(candles)
+    swings = find_swing_points(items, lookback=lookback, require_confirmation=True)
+    pools: list[LiquidityPool] = []
+    for kind, direction in (("low", StructureDirection.BULLISH), ("high", StructureDirection.BEARISH)):
+        remaining = [point for point in swings if point.kind == kind]
+        while remaining:
+            seed = remaining.pop(0)
+            cluster = [seed] + [point for point in remaining if abs(point.price - seed.price) <= tolerance]
+            remaining = [point for point in remaining if point not in cluster]
+            if len(cluster) < 2:
+                continue
+            level = sum(point.price for point in cluster) / len(cluster)
+            last_touch = max(int(point.confirmation_index) for point in cluster if point.confirmation_index is not None)
+            swept_index = None
+            for idx in range(last_touch + 1, len(items) - 1):
+                candle, following = items[idx], items[idx + 1]
+                through = candle.low <= level if direction == StructureDirection.BULLISH else candle.high >= level
+                reclaimed = following.close > level if direction == StructureDirection.BULLISH else following.close < level
+                if through and reclaimed:
+                    swept_index = idx + 1
+                    break
+            pools.append(LiquidityPool(direction, float(level), tuple(sorted(point.index for point in cluster)), swept_index is not None, swept_index))
+    return pools
 
 
 def detect_fvg(
@@ -646,7 +958,12 @@ def detect_order_blocks(
                 confirmation_timestamp=current.timestamp,
                 source_index=idx - 1,
                 confirmation_index=idx,
-                associated_structure_event="break_of_structure" if detect_break_of_structure(items[: idx + 1]) else "liquidity_sweep",
+                associated_structure_event=_associated_order_block_event(
+                    items,
+                    end_index=idx,
+                    direction=direction,
+                    lookback=2,
+                ),
                 displacement=float(displacement),
             )
         )
@@ -858,6 +1175,17 @@ def build_strategy_registry() -> dict[str, StrategyDefinition]:
             confirmation_rules=("sweep_reclaimed", "directional_order_block", "matching_structure_break"),
             invalidation_rules=("close_beyond_order_block_and_sweep_stop",),
         ),
+        "MANIPULATION_CONFIRMED_BOS": StrategyDefinition(
+            strategy_id="MANIPULATION_CONFIRMED_BOS",
+            strategy_version="v0.1",
+            required_features=("manipulation_confirmed_bos",),
+            confirmation_rules=("initial_break_swept", "failed_pullback_formed", "reclaim_closed"),
+            invalidation_rules=(
+                "manipulation_extreme_retaken",
+                "pre_break_level_reclaimed_against",
+                "opposing_bos_before_reclaim",
+            ),
+        ),
     }
 
 
@@ -865,6 +1193,7 @@ def evaluate_strategy(
     candles: Sequence[Candle] | Iterable[Candle] | None,
     *,
     strategy_id: str = "LIQUIDITY_SWEEP_FVG_REVERSAL",
+    instrument: InstrumentConfig = InstrumentConfig(),
 ) -> TradeSetup:
     """Evaluate the requested registered strategy and derive levels from its structure."""
     items = _coerce_candles(candles)
@@ -872,6 +1201,63 @@ def evaluate_strategy(
     definition = registry.get(strategy_id)
     if definition is None:
         return TradeSetup(strategy_id=strategy_id, strategy_version="unknown", direction=StructureDirection.UNKNOWN)
+    if strategy_id == "MANIPULATION_CONFIRMED_BOS":
+        pattern = detect_manipulation_confirmed_bos(items)
+        direction = pattern.direction if pattern is not None else StructureDirection.UNKNOWN
+        confirmed = pattern is not None and pattern.status == "CONFIRMED"
+        conditions = [
+            StrategyConditionResult("manipulation_confirmed_bos", pattern is not None),
+            StrategyConditionResult("initial_break_swept", pattern is not None and pattern.manipulation_extreme_index >= 0),
+            StrategyConditionResult("failed_pullback_formed", pattern is not None and pattern.failed_pullback_index >= 0),
+            StrategyConditionResult("reclaim_closed", confirmed),
+        ]
+        for rule in definition.invalidation_rules:
+            hit = pattern is not None and pattern.invalidation_reason == rule
+            detail = pattern.invalidation_reason if pattern is not None else "no manipulation candidate"
+            conditions.append(StrategyConditionResult(rule, not hit, detail or "not invalidated"))
+
+        entry = stop = target = None
+        if confirmed and pattern is not None and pattern.reclaim_index is not None:
+            reclaim_candle = items[pattern.reclaim_index]
+            entry = (reclaim_candle.high + reclaim_candle.low) / 2.0
+            stop = pattern.manipulation_extreme
+            known_swings = find_swing_points(
+                items[: pattern.reclaim_index + 1], require_confirmation=True
+            )
+            target_kind = "high" if direction == StructureDirection.BULLISH else "low"
+            pools = [
+                swing
+                for swing in known_swings
+                if swing.kind == target_kind
+                and ((swing.price > pattern.failed_pullback_level) if direction == StructureDirection.BULLISH else (swing.price < pattern.failed_pullback_level))
+                and not any(
+                    (items[j].high >= swing.price) if direction == StructureDirection.BULLISH else (items[j].low <= swing.price)
+                    for j in range(swing.confirmation_index + 1, pattern.reclaim_index + 1)
+                )
+            ]
+            candidates = [
+                swing.price
+                for swing in pools
+                if (swing.price > entry if direction == StructureDirection.BULLISH else swing.price < entry)
+            ]
+            target = (
+                min(candidates) if direction == StructureDirection.BULLISH else max(candidates)
+            ) if candidates else None
+
+        valid = confirmed and entry is not None and stop is not None and target is not None
+        return TradeSetup(
+            strategy_id=strategy_id,
+            strategy_version=definition.strategy_version,
+            direction=direction,
+            confidence=sum(condition.passed for condition in conditions) / max(1, len(conditions)),
+            entry=round(float(entry), instrument.price_decimals) if entry is not None else None,
+            stop=round(float(stop), instrument.price_decimals) if stop is not None else None,
+            target=round(float(target), instrument.price_decimals) if target is not None else None,
+            status="VALID" if valid else "INVALID",
+            conditions=tuple(conditions),
+            required_features=definition.required_features,
+            timestamp=items[-1].timestamp if items else None,
+        )
     sweep = detect_liquidity_sweep(items)
     gaps = detect_fvg(items)
     order_blocks = detect_order_blocks(items)
@@ -930,22 +1316,55 @@ def evaluate_strategy(
         strategy_version=definition.strategy_version,
         direction=direction,
         confidence=min(1.0, passed / max(1, len(conditions))),
-        entry=float(entry) if entry is not None else None,
-        stop=float(stop) if stop is not None else None,
-        target=float(target) if target is not None else None,
+        entry=round(float(entry), instrument.price_decimals) if entry is not None else None,
+        stop=round(float(stop), instrument.price_decimals) if stop is not None else None,
+        target=round(float(target), instrument.price_decimals) if target is not None else None,
         status="VALID" if valid else "INVALID",
         conditions=tuple(conditions),
         required_features=definition.required_features,
+        timestamp=items[-1].timestamp if items else None,
     )
 
 
+def to_quant_signal(setup: TradeSetup, *, symbol: str):
+    """Map a valid candidate into the repository's existing QuantSignal contract."""
+    if setup.status != "VALID":
+        return None
+    from tradingagents.graph.signal_processing import QuantSignal, SignalDirection, SignalSetupType
+
+    direction = SignalDirection.LONG if setup.direction == StructureDirection.BULLISH else SignalDirection.SHORT
+    reasons = [condition.name for condition in setup.conditions if condition.passed] or ["strategy_valid"]
+    return QuantSignal(
+        symbol=symbol,
+        timeframe="5m",
+        direction=direction,
+        setup_type=SignalSetupType.CONFIRMED_REVERSAL,
+        strength=setup.confidence,
+        reasons=reasons,
+        valid=True,
+        strategy_id=setup.strategy_id,
+        entry=setup.entry,
+        stop=setup.stop,
+        target=setup.target,
+        timestamp=setup.timestamp,
+    )
+
+
+def evaluate_quant_signal(candles, *, symbol: str, strategy_id: str = "LIQUIDITY_SWEEP_FVG_REVERSAL", instrument: InstrumentConfig = InstrumentConfig()):
+    """Public convenience entry point: evaluate a setup and convert valid candidates."""
+    return to_quant_signal(evaluate_strategy(candles, strategy_id=strategy_id, instrument=instrument), symbol=symbol)
+
+
 __all__ = [
+    "InstrumentConfig",
+    "LiquidityPool",
     "BreakOfStructure",
     "BreakerBlock",
     "DisplacementEvent",
     "FairValueGap",
     "InverseFairValueGap",
     "LiquiditySweep",
+    "ManipulationConfirmedBOS",
     "MarketStructureState",
     "OrderBlock",
     "PriceLocation",
@@ -966,9 +1385,14 @@ __all__ = [
     "detect_fvg",
     "detect_ifvg",
     "detect_liquidity_sweep",
+    "detect_liquidity_pools",
+    "STRUCTURE_EVENT_ALIASES",
+    "detect_manipulation_confirmed_bos",
     "detect_order_blocks",
     "detect_previous_levels",
     "detect_session_context",
     "evaluate_strategy",
+    "evaluate_quant_signal",
+    "to_quant_signal",
     "find_swing_points",
 ]
