@@ -17,6 +17,7 @@ from .errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
+from .forex_factory import get_economic_calendar as get_forex_factory_economic_calendar
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .sec_edgar import (
@@ -69,9 +70,10 @@ TOOLS_CATEGORIES = {
         ]
     },
     "macro_data": {
-        "description": "Macroeconomic indicators (rates, inflation, labor, growth)",
+        "description": "Macroeconomic indicators and event calendars (rates, inflation, labor, growth, releases)",
         "tools": [
             "get_macro_indicators",
+            "get_economic_calendar",
         ]
     },
     "prediction_markets": {
@@ -86,6 +88,7 @@ VENDOR_LIST = [
     "yfinance",
     "sec_edgar",
     "fred",
+    "forex_factory",
     "polymarket",
     "alpha_vantage",
 ]
@@ -145,6 +148,9 @@ VENDOR_METHODS = {
     # macro_data
     "get_macro_indicators": {
         "fred": get_fred_macro_data,
+    },
+    "get_economic_calendar": {
+        "forex_factory": get_forex_factory_economic_calendar,
     },
     # prediction_markets
     "get_prediction_markets": {

@@ -37,3 +37,23 @@ def get_macro_indicators(
         str: A formatted markdown report of the macro series
     """
     return route_to_vendor("get_macro_indicators", indicator, as_of(curr_date, trade_date), look_back_days)
+
+
+@tool
+def get_economic_calendar(
+    instrument: Annotated[
+        str,
+        "Instrument or focus area, e.g. 'XAUUSD', 'gold', 'USD', 'EURUSD', 'macro', or 'all'.",
+    ],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the event calendar window"],
+    limit: Annotated[int | None, "Maximum number of upcoming release rows to return."] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """Retrieve upcoming macroeconomic releases and risk events from the Forex Factory calendar.
+
+    This is an evidence source for XAUUSD and broad macro context: central-bank
+    decisions, inflation prints, labor data, growth releases, and commodity risk.
+    The data is kept separate from the trading decision layer, so it acts as
+    context and validation rather than as execution logic.
+    """
+    return route_to_vendor("get_economic_calendar", instrument, as_of(curr_date, trade_date), limit)

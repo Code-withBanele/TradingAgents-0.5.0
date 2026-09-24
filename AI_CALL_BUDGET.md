@@ -2,22 +2,21 @@
 
 ## Assumptions
 
-This budget assumes a 180-day research backtest with one decision cycle per trading day after the session close, using the combined analyst set for the initial Phase 1 design:
+This budget assumes a 180-day research backtest with one decision cycle per trading day after the session close, using the current three-node analyst-stage estimate:
 
-- Technical analyst
-- News + macro analyst (combined node for now)
+- Technical / market analyst
+- News + macro analyst (combined node for this estimate)
 - Sentiment analyst
-- Market regime analyst (planned but not yet split out as a separate node in the current codebase)
 
-This gives a 4-node analyst stage, with the analyst calls running in parallel because they all consume the same market context and do not depend on each other.
+This gives a 3-node analyst stage, with the analyst calls running in parallel because they all consume the same market context and do not depend on each other. No separate market regime analyst node exists in the current codebase. When a regime analyst is built in a later phase, revise these totals and estimates again to include it.
 
 ## Arithmetic behind the call split
 
 ### Parallel analyst stage
 
-- 4 analyst nodes per cycle
+- 3 analyst nodes per cycle
 - 180 cycles
-- Total parallel analyst calls = 4 x 180 = 720
+- Total parallel analyst calls = 3 x 180 = 540
 
 This is the part of the run that can be batched or fan-out in parallel because each analyst reads the same market context and generates a separate view.
 
@@ -39,7 +38,7 @@ The arithmetic is intentionally conservative rather than optimistic. It assumes 
 
 ## Total AI budget
 
-Total estimated AI calls for the 180-day backtest = 720 + 1,260 = 1,980 calls.
+Total estimated AI calls for the 180-day backtest = 540 + 1,260 = 1,800 calls.
 
 ## Estimated wall-clock latency
 
@@ -51,8 +50,8 @@ A wall-clock estimate depends on the per-call latency, but a realistic planning 
 
 Using a midpoint estimate of ~6 seconds per call for the full workflow:
 
-- 1,980 calls x 6 seconds = ~11,880 seconds
-- ~198 minutes = ~3.3 hours for the end-to-end run, assuming the parallel analyst stage is effectively batched and the sequential chain is serviced in order
+- 1,800 calls x 6 seconds = ~10,800 seconds
+- ~180 minutes = ~3 hours for the end-to-end run, using the same per-call midpoint and assuming the parallel analyst stage is effectively batched and the sequential chain is serviced in order
 
 In practice, the run will usually be slower than this idealized lower bound because:
 
@@ -61,7 +60,7 @@ In practice, the run will usually be slower than this idealized lower bound beca
 - network/caching variability introduces jitter
 - the sequential research and risk stages cannot be compressed into a single parallel fan-out
 
-A more realistic range for a serious historical replay is therefore roughly 4-10 hours, with a significantly longer run if retries or reasoning models are used at scale.
+A proportionally adjusted planning range for a serious historical replay is therefore roughly 3.6-9 hours, with a significantly longer run if retries or reasoning models are used at scale. Revise this range again when the regime analyst is built.
 
 ## Rough dollar-cost estimate
 
@@ -79,10 +78,10 @@ For a backtest of this size, the practical planning assumption is that each call
 
 That gives a ballpark:
 
-- 1,980 calls x $0.02/call = ~$39.60
-- 1,980 calls x $0.05/call = ~$99.00
+- 1,800 calls x $0.02/call = ~$36.00
+- 1,800 calls x $0.05/call = ~$90.00
 
-A more expensive reasoning model can push the run into the $150-$400 range, depending on whether the backtest uses the full debate stack, multiple risk scenarios, and repeated retries. This is why budgets must include retries, caching, and a strict ceiling before Phase 2 execution work begins.
+A more expensive reasoning model can push the run into roughly the $136-$364 range, depending on whether the backtest uses the full debate stack, multiple risk scenarios, and repeated retries. These estimates must be revised when the regime analyst is built. This is why budgets must include retries, caching, and a strict ceiling before Phase 2 execution work begins.
 
 ## Why this is a realistic budget
 

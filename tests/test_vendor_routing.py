@@ -110,6 +110,15 @@ class VendorRoutingTests(unittest.TestCase):
         self.assertIn("DATA_UNAVAILABLE", result)
         self.assertIn("macro_data", result)
 
+    def test_economic_calendar_can_route_to_forex_factory(self):
+        set_config({"data_vendors": {"macro_data": "forex_factory"}})
+        with self._route_method(
+            "get_economic_calendar",
+            {"forex_factory": lambda instrument, curr_date, limit=None: "FOREX_FACTORY_OK"},
+        ):
+            result = interface.route_to_vendor("get_economic_calendar", "XAUUSD", "2026-01-01")
+        self.assertEqual(result, "FOREX_FACTORY_OK")
+
     def test_core_category_still_raises_on_error(self):
         # A core category (single configured vendor) propagates the error so a
         # broken primary is loud, not silently degraded.

@@ -59,3 +59,24 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
         fresh = get_config()
         self.assertEqual(fresh["tool_vendors"]["get_stock_data"], "alpha_vantage")
         self.assertEqual(fresh["tool_vendors"]["get_news"], "alpha_vantage")
+
+    def test_deeply_nested_dict_updates_merge_recursively(self):
+        set_config({
+            "tool_vendors": {
+                "market": {
+                    "primary": "alpha_vantage",
+                    "fallback": "yfinance",
+                }
+            }
+        })
+        set_config({
+            "tool_vendors": {
+                "market": {
+                    "primary": "polygon",
+                }
+            }
+        })
+
+        fresh = get_config()
+        self.assertEqual(fresh["tool_vendors"]["market"]["primary"], "polygon")
+        self.assertEqual(fresh["tool_vendors"]["market"]["fallback"], "yfinance")

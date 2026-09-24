@@ -6,6 +6,18 @@ import tradingagents.default_config as default_config
 _config: dict | None = None
 
 
+def _deep_merge(base: dict, incoming: dict) -> dict:
+    """Recursively merge nested dictionaries while keeping scalar replacement semantics."""
+    merged = deepcopy(base)
+    for key, value in incoming.items():
+        existing = merged.get(key)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            merged[key] = _deep_merge(existing, value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 def initialize_config():
     """Initialize the configuration with default values."""
     global _config
@@ -16,18 +28,13 @@ def initialize_config():
 def set_config(config: dict):
     """Update the configuration with custom values.
 
-    Dict-valued keys (e.g. ``data_vendors``) are merged one level deep so a
-    partial update like ``{"data_vendors": {"core_stock_apis": "alpha_vantage"}}``
-    keeps the other nested keys from the default; scalar keys are replaced.
+    Nested dict-valued keys are merged recursively so partial updates keep the
+    existing defaults for untouched leaves while explicit scalar values replace
+    the previous value.
     """
     global _config
     initialize_config()
-    incoming = deepcopy(config)
-    for key, value in incoming.items():
-        if isinstance(value, dict) and isinstance(_config.get(key), dict):
-            _config[key].update(value)
-        else:
-            _config[key] = value
+    _config = _deep_merge(_config, deepcopy(config))
 
 
 def get_config() -> dict:

@@ -2,12 +2,21 @@ import pytest
 
 from tradingagents.dataflows.intraday_types import Candle, Timeframe
 from tradingagents.dataflows.market_structure import (
+    FairValueGap,
+    LiquiditySweep,
+    OrderBlock,
     StructureDirection,
     compute_market_structure,
     detect_break_of_structure,
+    detect_breaker_blocks,
+    detect_fvg,
     detect_liquidity_sweep,
+    detect_order_blocks,
+    detect_session_context,
+    evaluate_strategy,
     find_swing_points,
 )
+import tradingagents.dataflows.market_structure as market_structure
 
 
 def _candles_from_prices(values, *, symbol="XAUUSD"):
@@ -102,9 +111,12 @@ def test_confirmation_requires_future_candle_for_swing():
         {"open": 101.5, "high": 101.8, "low": 100.5, "close": 101.1},
         {"open": 100.8, "high": 102.4, "low": 100.4, "close": 102.0},
         {"open": 101.9, "high": 102.1, "low": 100.9, "close": 101.4},
+        {"open": 101.4, "high": 101.9, "low": 100.8, "close": 101.2},
     ])
     confirmed = find_swing_points(candles, lookback=2, require_confirmation=True)
-    assert any(point.kind == "high" and point.confirmed for point in confirmed)
+    high = next(point for point in confirmed if point.kind == "high")
+    assert high.confirmed
+    assert high.confirmation_index == high.index + 2
 
 
 def test_bullish_structure_from_recent_swings():
@@ -137,31 +149,44 @@ def test_neutral_unknown_structure_for_insufficient_data():
 
 def test_bullish_bos_detected_once():
     candles = _ohlc_candles([
-        {"open": 100, "high": 101, "low": 99, "close": 100.2},
-        {"open": 100.2, "high": 101.2, "low": 99.5, "close": 100.6},
-        {"open": 100.8, "high": 101.5, "low": 100.1, "close": 101.1},
-        {"open": 101.2, "high": 101.8, "low": 100.7, "close": 101.7},
-        {"open": 101.6, "high": 102.2, "low": 101.0, "close": 102.3},
-        {"open": 102.1, "high": 102.5, "low": 101.4, "close": 102.1},
+        {"open": 99.5, "high": 100, "low": 99, "close": 99.5},
+        {"open": 100, "high": 101, "low": 99.5, "close": 100.5},
+        {"open": 101, "high": 103, "low": 100, "close": 102},
+        {"open": 102, "high": 102, "low": 100.2, "close": 101},
+        {"open": 101, "high": 101.8, "low": 100.5, "close": 101.5},
+        {"open": 101.5, "high": 104, "low": 101, "close": 103.5},
     ])
     bos = detect_break_of_structure(candles, lookback=2)
     assert bos is not None
     assert bos.detected is True
     assert bos.direction == StructureDirection.BULLISH
+    assert bos.confirmation_index == 5
 
 
 def test_bearish_bos_detected_once():
     candles = _ohlc_candles([
-        {"open": 100, "high": 101.5, "low": 99.0, "close": 100.8},
-        {"open": 101.0, "high": 101.9, "low": 99.8, "close": 100.6},
-        {"open": 100.5, "high": 101.1, "low": 99.2, "close": 99.6},
-        {"open": 99.8, "high": 100.5, "low": 98.8, "close": 98.9},
-        {"open": 99.1, "high": 99.6, "low": 97.8, "close": 98.2},
+        {"open": 100.5, "high": 101.5, "low": 100, "close": 100.5},
+        {"open": 100.5, "high": 101.9, "low": 99.8, "close": 100.6},
+        {"open": 100.5, "high": 101.1, "low": 97, "close": 98},
+        {"open": 98, "high": 100.5, "low": 98.8, "close": 99},
+        {"open": 99, "high": 99.6, "low": 98.2, "close": 98.5},
+        {"open": 98.5, "high": 99, "low": 96, "close": 96.5},
     ])
     bos = detect_break_of_structure(candles, lookback=2)
     assert bos is not None
     assert bos.detected is True
     assert bos.direction == StructureDirection.BEARISH
+    assert bos.confirmation_index == 5
+
+
+def test_bos_does_not_use_a_swing_before_its_confirmation_bar():
+    candles = _ohlc_candles([
+        {"open": 99.5, "high": 100, "low": 99, "close": 99.5},
+        {"open": 99.5, "high": 101, "low": 99.2, "close": 100.5},
+        {"open": 100.5, "high": 103, "low": 100, "close": 102},
+        {"open": 102, "high": 104, "low": 101, "close": 103.5},
+    ])
+    assert detect_break_of_structure(candles, lookback=1) is None
 
 
 def test_no_bos_when_price_does_not_clear_prior_extremum():
@@ -192,7 +217,7 @@ def test_bearish_liquidity_sweep_detected_after_reclaim():
     candles = _ohlc_candles([
         {"open": 100, "high": 101.4, "low": 99.7, "close": 100.8},
         {"open": 100.7, "high": 101.2, "low": 99.8, "close": 100.0},
-        {"open": 99.8, "high": 101.0, "low": 98.9, "close": 99.1},
+        {"open": 99.8, "high": 101.3, "low": 98.9, "close": 99.1},
         {"open": 99.1, "high": 100.0, "low": 98.6, "close": 98.8},
     ])
     sweep = detect_liquidity_sweep(candles)
@@ -221,6 +246,8 @@ def test_close_back_through_level_confirms_sweep():
     assert sweep is not None
     assert sweep.detected is True
     assert sweep.direction == StructureDirection.BULLISH
+    assert sweep.sweep_index == 1
+    assert sweep.confirmation_index == 2
 
 
 def test_insufficient_history_for_liquidity_sweep_is_none():
@@ -243,3 +270,125 @@ def test_malformed_candle_input_is_rejected():
 def test_equal_highs_lows_do_not_create_swings():
     candles = _candles_from_prices([100, 100, 100, 100])
     assert find_swing_points(candles, lookback=2) == []
+
+
+def test_breaker_blocks_accept_one_shot_iterables():
+    candles = _ohlc_candles([
+        {"open": 99.5, "high": 100, "low": 99, "close": 99.5},
+        {"open": 99.5, "high": 101, "low": 99.2, "close": 100.5},
+        {"open": 100.5, "high": 105, "low": 100, "close": 104.5},
+        {"open": 100, "high": 101, "low": 98, "close": 98.5},
+    ])
+    expected = detect_breaker_blocks(candles, min_displacement=0)
+    actual = detect_breaker_blocks((candle for candle in candles), min_displacement=0)
+    assert actual == expected
+    assert actual
+
+
+def test_bearish_sweep_requires_actual_resistance_cross():
+    candles = _ohlc_candles([
+        {"open": 99, "high": 100, "low": 98, "close": 99},
+        {"open": 99, "high": 99.9, "low": 98.5, "close": 99.2},
+        {"open": 99.2, "high": 99.7, "low": 98.6, "close": 99.1},
+        {"open": 99.1, "high": 99.3, "low": 98.8, "close": 99.0},
+    ])
+    assert detect_liquidity_sweep(candles) is None
+
+
+def test_bullish_sweep_requires_actual_support_cross():
+    candles = _ohlc_candles([
+        {"open": 101, "high": 102, "low": 100, "close": 101},
+        {"open": 101, "high": 101.8, "low": 100.2, "close": 101},
+        {"open": 101, "high": 101.5, "low": 100.3, "close": 101.1},
+        {"open": 101.1, "high": 101.3, "low": 100.5, "close": 101.2},
+    ])
+    assert detect_liquidity_sweep(candles) is None
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2024-03-08T12:30:00Z", "LONDON"),
+        ("2024-03-11T12:30:00Z", "LONDON_NEW_YORK_OVERLAP"),
+        ("2024-03-29T07:30:00Z", "ASIA"),
+        ("2024-04-01T07:30:00Z", "LONDON"),
+        ("2024-10-25T07:30:00Z", "LONDON"),
+        ("2024-10-28T07:30:00Z", "ASIA"),
+        ("2024-11-01T12:30:00Z", "LONDON_NEW_YORK_OVERLAP"),
+        ("2024-11-04T12:30:00Z", "LONDON"),
+    ],
+)
+def test_session_classification_at_us_and_uk_dst_boundaries(timestamp, expected):
+    template = _ohlc_candles([{"open": 1, "high": 2, "low": 0, "close": 1}])[0]
+    candle = template.model_copy(update={"timestamp": timestamp})
+    context = detect_session_context([candle])
+    assert context.session.value == expected
+
+
+def test_strategy_registry_requirements_drive_evaluation():
+    candles = _candles_from_prices([100, 101, 99, 102])
+    fvg_setup = evaluate_strategy(candles, strategy_id="LIQUIDITY_SWEEP_FVG_REVERSAL")
+    block_setup = evaluate_strategy(candles, strategy_id="LIQUIDITY_SWEEP_ORDER_BLOCK_REVERSAL")
+    assert fvg_setup.required_features == ("liquidity_sweep", "fair_value_gap")
+    assert block_setup.required_features == ("liquidity_sweep", "order_block")
+    assert {condition.name for condition in fvg_setup.conditions} != {
+        condition.name for condition in block_setup.conditions
+    }
+
+
+def test_fvg_strategy_rejects_required_gap_in_wrong_direction(monkeypatch):
+    monkeypatch.setattr(
+        market_structure,
+        "detect_liquidity_sweep",
+        lambda _: LiquiditySweep(True, StructureDirection.BULLISH, 100, "2024-01-01T00:00:00Z"),
+    )
+    monkeypatch.setattr(
+        market_structure,
+        "detect_fvg",
+        lambda _: [FairValueGap(StructureDirection.BEARISH, 99, 100, "t", "t")],
+    )
+    setup = evaluate_strategy([], strategy_id="LIQUIDITY_SWEEP_FVG_REVERSAL")
+    gap_condition = next(item for item in setup.conditions if item.name == "fair_value_gap")
+    assert not gap_condition.passed
+    assert setup.status == "INVALID"
+
+
+def test_order_block_strategy_rejects_required_block_in_wrong_direction(monkeypatch):
+    monkeypatch.setattr(
+        market_structure,
+        "detect_liquidity_sweep",
+        lambda _: LiquiditySweep(True, StructureDirection.BULLISH, 100, "2024-01-01T00:00:00Z"),
+    )
+    monkeypatch.setattr(market_structure, "detect_fvg", lambda _: [])
+    monkeypatch.setattr(
+        market_structure,
+        "detect_order_blocks",
+        lambda _: [OrderBlock(StructureDirection.BEARISH, 101, 99, "a", "b")],
+    )
+    setup = evaluate_strategy([], strategy_id="LIQUIDITY_SWEEP_ORDER_BLOCK_REVERSAL")
+    block_condition = next(item for item in setup.conditions if item.name == "order_block")
+    assert not block_condition.passed
+    assert setup.status == "INVALID"
+
+
+def test_absolute_order_block_threshold_allows_first_candidate_pair():
+    candles = _ohlc_candles([
+        {"open": 100, "high": 101, "low": 99, "close": 100},
+        {"open": 100, "high": 102, "low": 99.5, "close": 101},
+    ])
+    blocks = detect_order_blocks(candles, min_displacement=0.5)
+    assert len(blocks) == 1
+    assert blocks[0].source_index == 0
+    assert blocks[0].confirmation_index == 1
+
+
+def test_fvg_is_available_only_at_third_candle_close():
+    candles = _ohlc_candles([
+        {"open": 100, "high": 101, "low": 99, "close": 100},
+        {"open": 101, "high": 103, "low": 100, "close": 102},
+        {"open": 103, "high": 104, "low": 102, "close": 103.5},
+    ])
+    gap = detect_fvg(candles)[0]
+    assert gap.formation_index == 1
+    assert gap.confirmation_index == 2
+    assert detect_fvg(candles[:2]) == []
